@@ -1,1 +1,1 @@
-# qwen-code
+# clinetx
