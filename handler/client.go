@@ -28,6 +28,7 @@ const (
 // ClientOptions defines config options for the client.
 type ClientOptions struct {
 	Timeout time.Duration
+	Retry   bool
 }
 
 // ClientOption defines a functional option for configuring the client.
@@ -40,9 +41,16 @@ func WithTimeout(timeout time.Duration) ClientOption {
 	}
 }
 
+func WithRetry(retry bool) ClientOption {
+	return func(options *ClientOptions) {
+		options.Retry = retry
+	}
+}
+
 // Client is a http client that execute requests.
 type Client struct {
 	client *http.Client
+	ClientOptions
 }
 
 // NewClient returns a client to execute requests.
@@ -56,11 +64,19 @@ func NewClient(opts ...ClientOption) *Client {
 	}
 
 	client := &http.Client{Timeout: opt.Timeout}
-	return &Client{client: client}
+	return &Client{client: client, ClientOptions: *opt}
 }
 
 // Send sends a HTTP request and returns response.
 func (c *Client) Send(ctx context.Context, req Request) (*Response, error) {
+	// Context deadline bounds the whole Send (retries, backoff, reading the body).
+	// http.Client.Timeout (set in NewClient) bounds each RoundTrip (each Do).
+	// They do not add up: for each attempt, whichever stricter limit fires first wins.
+	if c.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
+		defer cancel()
+	}
 	httpReq, err := c.buildRequest(ctx, req)
 	if err != nil {
 		return nil, err
@@ -122,7 +138,13 @@ func (c *Client) buildRequest(ctx context.Context, req Request) (*http.Request, 
 
 // doRequest executes the HTTP request and returns the processed response.
 func (c *Client) doRequest(req *http.Request) (*Response, error) {
-	resp, err := c.client.Do(req) //nolint:nolintlint
+	var resp *http.Response
+	var err error
+	if c.Retry {
+		resp, err = c.doWithRetry(req)
+	} else {
+		resp, err = c.client.Do(req) //nolint:nolintlint
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send HTTP request: %w", err)
 	}
