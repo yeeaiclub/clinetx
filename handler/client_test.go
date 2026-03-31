@@ -6,9 +6,11 @@ package handler
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -75,6 +77,55 @@ func TestClientSendRetry(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 		assert.EqualValues(t, maxHTTPRetryAttempts, calls.Load())
+	})
+
+	t.Run("retry preserves request body", func(t *testing.T) {
+		var calls atomic.Int32
+		var mu sync.Mutex
+		var bodies []string
+		expectedBody := `{"name":"wyz"}`
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := calls.Add(1)
+			b, _ := io.ReadAll(r.Body)
+
+			mu.Lock()
+			bodies = append(bodies, string(b))
+			mu.Unlock()
+
+			if n < maxHTTPRetryAttempts {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}))
+		t.Cleanup(srv.Close)
+
+		cli := NewClient(WithRetry(true))
+		type Req struct {
+			Name string `json:"name"`
+		}
+		req := Request{
+			BaseURL:   srv.URL,
+			Path:      "v1",
+			Method:    http.MethodPost,
+			AuthToken: "t",
+			Body:      Req{Name: "wyz"},
+		}
+
+		resp, err := cli.Send(context.Background(), req)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.EqualValues(t, maxHTTPRetryAttempts, calls.Load())
+
+		mu.Lock()
+		defer mu.Unlock()
+		if assert.Len(t, bodies, maxHTTPRetryAttempts) {
+			for _, b := range bodies {
+				assert.JSONEq(t, expectedBody, b)
+			}
+		}
 	})
 
 	t.Run("retry stops when context ends during backoff", func(t *testing.T) {

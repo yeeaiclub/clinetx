@@ -141,7 +141,7 @@ func (c *Client) doRequest(req *http.Request) (*Response, error) {
 	var resp *http.Response
 	var err error
 	if c.Retry {
-		resp, err = c.doWithRetry(req)
+		resp, err = doWithRetry(c.client, req)
 	} else {
 		resp, err = c.client.Do(req) //nolint:nolintlint
 	}

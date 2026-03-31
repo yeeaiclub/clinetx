@@ -4,7 +4,9 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"time"
 )
@@ -34,20 +36,44 @@ func sleepWithCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
+func doWithRetry(client *http.Client, req *http.Request) (*http.Response, error) {
+	// Retry must be able to re-send the request body.
+	// net/http consumes req.Body on the first Do, so we cache it here
+	// and create a fresh Body for each retry attempt.
+	var (
+		bodyBytes     []byte
+		hasBodyToSend = req.Body != nil
+	)
+	if hasBodyToSend {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		_ = req.Body.Close()
+	}
+
 	var resp *http.Response
 	var err error
 	for i := range maxHTTPRetryAttempts {
 		if resp != nil {
 			resp.Body.Close()
 		}
-		resp, err = c.client.Do(req)
+
+		attemptReq := req.Clone(req.Context())
+		if hasBodyToSend {
+			attemptReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			attemptReq.ContentLength = int64(len(bodyBytes))
+		}
+
+		resp, err = client.Do(attemptReq)
 		if err != nil {
 			return nil, err
 		}
 		if !shouldRetryHTTPStatus(resp.StatusCode) {
 			return resp, nil
 		}
+
 		if i < maxHTTPRetryAttempts-1 {
 			if err = sleepWithCtx(req.Context(), httpRetryBackoff(i)); err != nil {
 				resp.Body.Close()
